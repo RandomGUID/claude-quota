@@ -14,11 +14,19 @@ On exit 2, callers consult CLAUDE_QUOTA_ON_PROBE_FAILURE:
   continue            — treat as within limits, keep going
 
 Usage:
-  claude-probe           check limits
+  claude-probe           fresh probe
+  claude-probe --cached  use cached result if recent enough (for Stop hook)
   claude-probe --check   validate the full setup and exit
+
+--cached uses an adaptive check interval based on utilization to avoid a
+3-second AppleScript delay after every Claude response:
+  < 80%   check every 30 minutes
+  80-90%  check every 5 minutes
+  90-95%  check every 2 minutes
+  >= 95%  check every 30 seconds
 """
 
-import subprocess, json, sys, os
+import subprocess, json, sys, os, time
 
 FAIL_MODE = os.environ.get('CLAUDE_QUOTA_ON_PROBE_FAILURE', 'stop').lower()
 
@@ -157,10 +165,73 @@ def run_check():
         sys.exit(1)
 
 
+CACHE_FILE = os.path.expanduser('~/.claude/quota_cache.json')
+
+
+def cache_interval(max_util):
+    """Return how many seconds the cached result is valid for, given utilization."""
+    if max_util >= 95:  return 30
+    if max_util >= 90:  return 120
+    if max_util >= 80:  return 300
+    return 1800
+
+
+def read_cache():
+    try:
+        with open(CACHE_FILE) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+
+
+def write_cache(result):
+    result['cached_at'] = time.time()
+    try:
+        with open(CACHE_FILE, 'w') as f:
+            json.dump(result, f)
+    except OSError:
+        pass  # non-fatal
+
+
+def run_cached():
+    """Return cached result if still fresh; otherwise run a fresh probe and cache it."""
+    cache = read_cache()
+    if cache:
+        age = time.time() - cache.get('cached_at', 0)
+        five_util  = (cache.get('five_hour')  or {}).get('utilization') or 0
+        seven_util = (cache.get('seven_day') or {}).get('utilization') or 0
+        max_util   = max(five_util, seven_util)
+        interval   = cache_interval(max_util)
+        if age < interval:
+            print(json.dumps(cache))
+            sys.exit(1 if cache.get('limited') else (2 if cache.get('probe_failed') else 0))
+
+    # Cache stale or missing — run a fresh probe and cache the result.
+    # We re-invoke ourselves without --cached to get the actual probe logic,
+    # capture the output, write the cache, then forward the exit code.
+    result = subprocess.run(
+        [sys.argv[0]],
+        capture_output=True, text=True
+    )
+    stdout = result.stdout.strip()
+    if stdout:
+        try:
+            data = json.loads(stdout)
+            write_cache(data)
+        except (json.JSONDecodeError, TypeError):
+            pass
+    print(stdout)
+    sys.exit(result.returncode)
+
+
 def main():
     if len(sys.argv) > 1 and sys.argv[1] == '--check':
         print("claude-quota setup check:")
         run_check()
+        return
+
+    if len(sys.argv) > 1 and sys.argv[1] == '--cached':
+        run_cached()
         return
 
     try:

@@ -73,6 +73,31 @@ file is absent, `claude-watch` exits normally.
 Multiple instances share the same flag file. Whichever instance's Stop hook
 fires first writes the reset time; the others pick it up on their next exit.
 
+## Adaptive probe caching
+
+The Stop hook fires after every Claude response. A fresh AppleScript probe takes
+~3 seconds (the async fetch + delay). At low utilization, probing on every
+response would add ~10% overhead for no real benefit.
+
+`claude-probe --cached` reads `~/.claude/quota_cache.json` and only runs a fresh
+probe when the cached result is stale. The staleness threshold adapts to how
+close you are to the limit:
+
+| Utilization | Check interval |
+|---|---|
+| < 80% | 30 minutes |
+| 80–90% | 5 minutes |
+| 90–95% | 2 minutes |
+| ≥ 95% | 30 seconds |
+
+The tradeoff: at < 80% you could burn up to 30 minutes of extra credits before
+being caught. In practice, utilization climbs gradually and the 80% threshold
+tightens the window before real danger. If you want tighter guarantees, lower
+the thresholds in `cache_interval()`.
+
+`claude-watch` always uses a fresh probe (no `--cached`) since it only runs once
+on Claude exit, where an accurate reading matters.
+
 ## What this does not cover
 
 - **Monthly extra-usage cap** (`extra_usage` in the API response) — this is a

@@ -29,8 +29,9 @@ if printf '%s' "$input" | python3 -c \
     exit 0
 fi
 
-# Probe limits.
-probe_out=$("$PROBE" 2>/dev/null)
+# Probe limits. --cached uses an adaptive interval so the 3-second AppleScript
+# call doesn't fire after every response — only when the cache is stale.
+probe_out=$("$PROBE" --cached 2>/dev/null)
 probe_code=$?
 
 if [ "$probe_code" -eq 1 ]; then
