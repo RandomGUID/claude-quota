@@ -1,0 +1,67 @@
+#!/bin/sh
+# Wraps 'claude' and auto-resumes after a usage limit resets.
+# set -e omitted intentionally: claude's non-zero exit must not kill the loop.
+#
+# Usage: claude-watch [claude args...]
+#   Run from the worktree directory you want Claude to work in.
+
+PROBE="${HOME}/bin/claude-probe"
+LIMIT_FILE="${HOME}/.claude/limit_reset_at"
+
+resume=0
+while true; do
+    if [ "$resume" -eq 0 ]; then
+        claude "$@"
+    else
+        printf '\nResuming claude session...\n'
+        claude --resume "$@"
+    fi
+    code=$?
+
+    # Clean exit (user typed /exit or Ctrl-D) — only stop if not limit-paused
+    if [ "$code" -eq 0 ] && [ ! -f "$LIMIT_FILE" ]; then
+        exit 0
+    fi
+
+    # Check whether a limit is currently active
+    probe_out=$("$PROBE" 2>/dev/null)
+    probe_code=$?
+
+    if [ "$probe_code" -ne 1 ] && [ ! -f "$LIMIT_FILE" ]; then
+        # Not a limit issue — exit normally
+        exit "$code"
+    fi
+
+    # Determine reset time: prefer the flag file (written by Stop hook mid-session),
+    # fall back to fresh probe output
+    if [ -f "$LIMIT_FILE" ]; then
+        resume_at=$(cat "$LIMIT_FILE")
+        rm -f "$LIMIT_FILE"
+    else
+        resume_at=$(printf '%s' "$probe_out" | python3 -c \
+            "import json,sys; d=json.load(sys.stdin); print(d.get('resume_at',''))" 2>/dev/null)
+    fi
+
+    if [ -z "$resume_at" ]; then
+        printf '\nUsage limit hit but reset time unknown — waiting 1 hour.\n'
+        sleep 3600
+    else
+        reset_epoch=$(python3 -c "
+from datetime import datetime
+ts = '$resume_at'
+dt = datetime.fromisoformat(ts.replace('Z', '+00:00'))
+print(int(dt.timestamp()))
+" 2>/dev/null)
+
+        now=$(date +%s)
+        wait_secs=$((reset_epoch - now + 60))   # 60s buffer after reset
+
+        if [ "$wait_secs" -gt 0 ]; then
+            wait_mins=$((wait_secs / 60))
+            printf '\nUsage limit hit. Resuming at %s (%dm from now).\n' "$resume_at" "$wait_mins"
+            sleep "$wait_secs"
+        fi
+    fi
+
+    resume=1
+done
