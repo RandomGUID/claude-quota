@@ -83,6 +83,13 @@ response would add ~10% overhead for no real benefit.
 probe when the cached result is stale. The staleness threshold adapts to how
 close you are to the limit:
 
+The two limits are tracked separately because they move at very different speeds.
+The five-hour limit can ramp quickly within an active session. The weekly limit
+climbs slowly over 7 days — a high weekly number late in the week shouldn't slow
+down that day's work.
+
+**Five-hour limit:**
+
 | Utilization | Check interval |
 |---|---|
 | < 80% | 30 minutes |
@@ -90,10 +97,17 @@ close you are to the limit:
 | 90–95% | 2 minutes |
 | ≥ 95% | 30 seconds |
 
-The tradeoff: at < 80% you could burn up to 30 minutes of extra credits before
-being caught. In practice, utilization climbs gradually and the 80% threshold
-tightens the window before real danger. If you want tighter guarantees, lower
-the thresholds in `cache_interval()`.
+**Weekly limit:**
+
+| Utilization | Check interval |
+|---|---|
+| < 95% | 30 minutes |
+| 95–98% | 5 minutes |
+| ≥ 98% | 2 minutes |
+
+The effective interval is `min(five_hour_interval, seven_day_interval)`. At 83%
+weekly with a fresh five-hour window, the interval stays at 30 minutes. If you
+want tighter guarantees, adjust the thresholds in `cache_interval()`.
 
 `claude-watch` always uses a fresh probe (no `--cached`) since it only runs once
 on Claude exit, where an accurate reading matters.

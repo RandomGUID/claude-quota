@@ -168,12 +168,24 @@ def run_check():
 CACHE_FILE = os.path.expanduser('~/.claude/quota_cache.json')
 
 
-def cache_interval(max_util):
-    """Return how many seconds the cached result is valid for, given utilization."""
-    if max_util >= 95:  return 30
-    if max_util >= 90:  return 120
-    if max_util >= 80:  return 300
-    return 1800
+def cache_interval(five_hour_pct, seven_day_pct):
+    """Return how many seconds the cached result is valid for.
+
+    The five-hour limit can ramp quickly within a session, so it gets tight
+    intervals near 100%. The weekly limit climbs slowly over 7 days — only
+    tighten it when genuinely close to the ceiling so late-week sessions
+    aren't slowed down by a high-but-stable weekly number.
+    """
+    if five_hour_pct >= 95:   five_hour_interval = 30
+    elif five_hour_pct >= 90: five_hour_interval = 120
+    elif five_hour_pct >= 80: five_hour_interval = 300
+    else:                     five_hour_interval = 1800
+
+    if seven_day_pct >= 98:   seven_day_interval = 120
+    elif seven_day_pct >= 95: seven_day_interval = 300
+    else:                     seven_day_interval = 1800
+
+    return min(five_hour_interval, seven_day_interval)
 
 
 def read_cache():
@@ -198,10 +210,9 @@ def run_cached():
     cache = read_cache()
     if cache:
         age = time.time() - cache.get('cached_at', 0)
-        five_util  = (cache.get('five_hour')  or {}).get('utilization') or 0
-        seven_util = (cache.get('seven_day') or {}).get('utilization') or 0
-        max_util   = max(five_util, seven_util)
-        interval   = cache_interval(max_util)
+        five_hour_pct  = (cache.get('five_hour')  or {}).get('utilization') or 0
+        seven_day_pct  = (cache.get('seven_day') or {}).get('utilization') or 0
+        interval       = cache_interval(five_hour_pct, seven_day_pct)
         if age < interval:
             print(json.dumps(cache))
             sys.exit(1 if cache.get('limited') else (2 if cache.get('probe_failed') else 0))
