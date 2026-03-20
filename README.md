@@ -1,28 +1,19 @@
 # claude-quota
 
+![macOS](https://img.shields.io/badge/macOS-only-lightgrey?logo=apple)
+![License: MIT](https://img.shields.io/badge/license-MIT-blue)
+
 Pause Claude Code when your usage limit hits. Resume when it resets.
 
 Runs multiple Claude Code instances overnight without burning extra credits.
 When either the 5-hour or weekly limit is exceeded, each instance finishes
 its current response and stops. When the limit resets, they resume automatically.
 
-## How it works
-
-`claude-quota` probes `claude.ai/api/.../usage` by running a `fetch()` inside
-a live Chrome tab via AppleScript — the same session your browser already has,
-no separate auth needed, no Cloudflare friction.
-
-A global Stop hook checks limits after every Claude response. When a limit is
-exceeded it writes the reset timestamp to `~/.claude/limit_reset_at`. The
-`claude-watch` wrapper reads that file on exit, sleeps until the reset time,
-and runs `claude --resume` to pick up the session.
-
 ## Requirements
 
 - macOS
 - Claude Code CLI
 - Google Chrome with a `claude.ai` tab open
-- Chrome setting enabled: **View → Developer → Allow JavaScript from Apple Events**
 
 ## Install
 
@@ -32,41 +23,70 @@ cd claude-quota
 ./install.sh
 ```
 
-Then add `~/bin` to your PATH if it isn't already:
+`install.sh` puts the scripts in `~/bin` by default. To install elsewhere:
 
 ```sh
-echo 'export PATH="$HOME/bin:$PATH"' >> ~/.zshrc
-source ~/.zshrc
+CLAUDE_QUOTA_BIN=/usr/local/bin ./install.sh
+```
+
+After installing, enable Chrome AppleScript access (one-time):
+
+> Chrome → View → Developer → Allow JavaScript from Apple Events
+
+Then verify everything is wired up:
+
+```sh
+claude-probe --check
 ```
 
 ## Usage
 
-Run `claude-watch` instead of `claude`, from whichever worktree directory you
-want Claude to work in:
+Run `claude-watch` instead of `claude`, from your worktree directory:
 
 ```sh
-cd ~/projects/my-worktree
+cd ~/projects/my-feature-branch
 claude-watch
 ```
 
-Multiple instances work independently — each one pauses and resumes on its own.
-They share the same usage pool, so whichever hits the limit first will cause the
-others to stop at the end of their current response too.
+That's it. When a limit is hit, you'll see:
 
-## Files installed
+```
+[claude-quota] Usage limit hit. Pausing until Mon Mar 23 at 11:00 AM PDT (237 min).
+```
 
-| File | Purpose |
-|---|---|
-| `~/bin/claude-probe` | Probes usage via Chrome AppleScript |
-| `~/bin/claude-watch` | Wrapper that resumes after limit resets |
-| `~/.claude/hooks/stop.sh` | Global Stop hook wired into all Claude Code sessions |
+And when it resets, Claude resumes automatically.
 
-The Stop hook is registered in `~/.claude/settings.json`. `install.sh` merges
-it non-destructively — existing hooks are preserved.
+Multiple instances work independently — run `claude-watch` in as many terminals
+as you like. They share the same usage pool and coordinate through a shared flag
+file (`~/.claude/limit_reset_at`).
+
+## When Chrome isn't available
+
+By default, if `claude-probe` can't reach Chrome or find a `claude.ai` tab, it
+**pauses Claude** rather than continuing. This is a deliberate choice: if Chrome
+closes at 3am while you're asleep, you don't silently burn extra credits.
+
+To opt into the opposite behaviour:
+
+```sh
+export CLAUDE_QUOTA_ON_PROBE_FAILURE=continue
+```
+
+See [DESIGN.md](DESIGN.md) for the full rationale.
+
+## How it works
+
+See [DESIGN.md](DESIGN.md).
+
+The short version: `claude-probe` runs a `fetch()` call inside a live Chrome
+`claude.ai` tab via AppleScript. The tab doesn't need to be active — Chrome
+doesn't switch windows or change anything visible. The probe reads the real
+usage API that claude.ai uses for its own settings page, so the numbers are
+always accurate.
 
 ## Caveats
 
-- Chrome must be running with a `claude.ai` tab open while Claude works overnight.
-  If it isn't, `claude-probe` fails open (assumes not limited) so Claude keeps working.
+- Chrome must be running with a `claude.ai` tab open.
 - The VS Code Claude extension is unaffected — Stop hooks only fire for Claude Code CLI.
-- Monthly extra-usage cap is not checked. Set a cap in claude.ai settings if needed.
+- Monthly extra-usage cap is not checked — manage it in your claude.ai account settings.
+- Other browsers (Safari, Firefox) are not supported.

@@ -4,31 +4,55 @@
 #
 # Usage: claude-watch [claude args...]
 #   Run from the worktree directory you want Claude to work in.
+#
+# Environment:
+#   CLAUDE_QUOTA_ON_PROBE_FAILURE=stop|continue
+#     What to do when claude-probe can't reach Chrome (default: stop).
+#     stop     — pause Claude as if the limit were hit
+#     continue — keep Claude running and check again next exit
 
 PROBE="${HOME}/bin/claude-probe"
 LIMIT_FILE="${HOME}/.claude/limit_reset_at"
+FAIL_MODE="${CLAUDE_QUOTA_ON_PROBE_FAILURE:-stop}"
+
+# Convert a UTC ISO 8601 timestamp to a human-readable local time string.
+local_time() {
+    python3 -c "
+from datetime import datetime
+dt = datetime.fromisoformat('$1'.replace('Z', '+00:00')).astimezone()
+print(dt.strftime('%a %b %-d at %-I:%M %p %Z'))
+" 2>/dev/null || printf '%s' "$1"
+}
 
 resume=0
 while true; do
     if [ "$resume" -eq 0 ]; then
         claude "$@"
     else
-        printf '\nResuming claude session...\n'
+        printf '\n[claude-quota] Resuming session...\n'
         claude --resume "$@"
     fi
     code=$?
 
-    # Clean exit (user typed /exit or Ctrl-D) — only stop if not limit-paused
+    # Clean exit (user typed /exit or Ctrl-D) — stop unless a limit flag is set
     if [ "$code" -eq 0 ] && [ ! -f "$LIMIT_FILE" ]; then
         exit 0
     fi
 
-    # Check whether a limit is currently active
+    # Check limits
     probe_out=$("$PROBE" 2>/dev/null)
     probe_code=$?
 
-    if [ "$probe_code" -ne 1 ] && [ ! -f "$LIMIT_FILE" ]; then
-        # Not a limit issue — exit normally
+    # probe_code=2 means Chrome was unreachable — honour FAIL_MODE
+    if [ "$probe_code" -eq 2 ] && [ "$FAIL_MODE" = "continue" ]; then
+        if [ ! -f "$LIMIT_FILE" ]; then
+            # Nothing to resume from — exit normally
+            exit "$code"
+        fi
+    fi
+
+    if [ "$probe_code" -eq 0 ] && [ ! -f "$LIMIT_FILE" ]; then
+        # Within limits and no pending flag — Claude stopped for another reason
         exit "$code"
     fi
 
@@ -43,13 +67,12 @@ while true; do
     fi
 
     if [ -z "$resume_at" ]; then
-        printf '\nUsage limit hit but reset time unknown — waiting 1 hour.\n'
+        printf '\n[claude-quota] Usage limit hit but reset time unknown — waiting 1 hour.\n'
         sleep 3600
     else
         reset_epoch=$(python3 -c "
 from datetime import datetime
-ts = '$resume_at'
-dt = datetime.fromisoformat(ts.replace('Z', '+00:00'))
+dt = datetime.fromisoformat('$resume_at'.replace('Z', '+00:00'))
 print(int(dt.timestamp()))
 " 2>/dev/null)
 
@@ -57,8 +80,10 @@ print(int(dt.timestamp()))
         wait_secs=$((reset_epoch - now + 60))   # 60s buffer after reset
 
         if [ "$wait_secs" -gt 0 ]; then
+            pretty=$(local_time "$resume_at")
             wait_mins=$((wait_secs / 60))
-            printf '\nUsage limit hit. Resuming at %s (%dm from now).\n' "$resume_at" "$wait_mins"
+            printf '\n[claude-quota] Usage limit hit. Pausing until %s (%d min).\n' \
+                "$pretty" "$wait_mins"
             sleep "$wait_secs"
         fi
     fi

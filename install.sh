@@ -1,9 +1,12 @@
 #!/bin/sh
 # Installs claude-quota tools and wires up the global Stop hook.
+#
+# By default installs executables to ~/bin. Override with CLAUDE_QUOTA_BIN:
+#   CLAUDE_QUOTA_BIN=/usr/local/bin ./install.sh
 set -e
 
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
-BIN_DIR="$HOME/bin"
+BIN_DIR="${CLAUDE_QUOTA_BIN:-$HOME/bin}"
 HOOKS_DIR="$HOME/.claude/hooks"
 SETTINGS="$HOME/.claude/settings.json"
 
@@ -20,7 +23,7 @@ chmod +x "$HOOKS_DIR/stop.sh"
 
 # Wire Stop hook into ~/.claude/settings.json non-destructively.
 # If the file doesn't exist, create a minimal one.
-# If it exists but has no Stop hook, add it.
+# If it exists but has no Stop hook entry for stop.sh, add it.
 if [ ! -f "$SETTINGS" ]; then
     cat > "$SETTINGS" << EOF
 {
@@ -40,14 +43,13 @@ if [ ! -f "$SETTINGS" ]; then
 EOF
     echo "Created $SETTINGS"
 else
-    # Check if Stop hook is already present
     if python3 -c "
 import json, sys
 with open('$SETTINGS') as f:
     d = json.load(f)
 hooks = d.get('hooks', {}).get('Stop', [])
 entries = [e for h in hooks for e in h.get('hooks', [])]
-exists = any('stop.sh' in e.get('command','') for e in entries)
+exists = any('stop.sh' in e.get('command', '') for e in entries)
 sys.exit(0 if exists else 1)
 " 2>/dev/null; then
         echo "Stop hook already present in $SETTINGS — skipping"
@@ -74,11 +76,22 @@ PYEOF
     fi
 fi
 
+# Check whether BIN_DIR is on PATH
+case ":$PATH:" in
+    *":$BIN_DIR:"*) on_path=1 ;;
+    *)              on_path=0 ;;
+esac
+
 echo ""
-echo "claude-quota installed."
+echo "claude-quota installed to $BIN_DIR."
 echo ""
-echo "Make sure ~/bin is on your PATH:"
-echo "  echo 'export PATH=\"\$HOME/bin:\$PATH\"' >> ~/.zshrc"
+if [ "$on_path" -eq 0 ]; then
+    echo "  $BIN_DIR is not on your PATH. Add it:"
+    echo "    echo 'export PATH=\"$BIN_DIR:\$PATH\"' >> ~/.zshrc"
+    echo ""
+fi
+echo "  Enable Chrome AppleScript access (one-time):"
+echo "    Chrome → View → Developer → Allow JavaScript from Apple Events"
 echo ""
-echo "And enable Chrome AppleScript access:"
-echo "  Chrome → View → Developer → Allow JavaScript from Apple Events"
+echo "  Verify setup:"
+echo "    claude-probe --check"

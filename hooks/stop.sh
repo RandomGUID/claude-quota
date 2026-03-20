@@ -6,12 +6,18 @@
 # wait rather than exit permanently.
 #
 # Does not force autonomous looping — that's left to each project's own
-# Stop hook or CLAUDE.md instructions. This hook only handles limit detection.
+# Stop hook or CLAUDE.md task instructions. This hook only handles limit
+# detection.
+#
+# Environment:
+#   CLAUDE_QUOTA_ON_PROBE_FAILURE=stop|continue (default: stop)
+#     Controls behaviour when Chrome is unreachable. See claude-probe --check.
 
 set -e
 
 PROBE="${HOME}/bin/claude-probe"
 LIMIT_FILE="${HOME}/.claude/limit_reset_at"
+FAIL_MODE="${CLAUDE_QUOTA_ON_PROBE_FAILURE:-stop}"
 
 input=$(cat)
 
@@ -23,15 +29,24 @@ if printf '%s' "$input" | python3 -c \
     exit 0
 fi
 
-# Probe limits. If exceeded, record the reset time for claude-watch.
+# Probe limits.
 probe_out=$("$PROBE" 2>/dev/null)
-if [ $? -eq 1 ]; then
+probe_code=$?
+
+if [ "$probe_code" -eq 1 ]; then
+    # Limit exceeded — record reset time for claude-watch
     resume_at=$(printf '%s' "$probe_out" | python3 -c \
         "import json,sys; d=json.load(sys.stdin); print(d.get('resume_at',''))" 2>/dev/null)
     if [ -n "$resume_at" ]; then
         printf '%s' "$resume_at" > "$LIMIT_FILE"
     fi
-    printf '[claude-watch] Usage limit reached (resume at %s). Stopping.\n' "$resume_at" >&2
+    printf '[claude-quota] Usage limit reached (resume at %s).\n' "$resume_at" >&2
+
+elif [ "$probe_code" -eq 2 ] && [ "$FAIL_MODE" = "stop" ]; then
+    # Probe failed and fail mode is stop — treat as limited without a known reset time.
+    # claude-watch will fall back to a 1-hour wait.
+    printf '[claude-quota] Probe failed (Chrome unreachable?). Pausing (CLAUDE_QUOTA_ON_PROBE_FAILURE=stop).\n' >&2
+    touch "$LIMIT_FILE"
 fi
 
 exit 0

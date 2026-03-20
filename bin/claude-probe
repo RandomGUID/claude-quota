@@ -1,20 +1,30 @@
 #!/usr/bin/env python3
 """Query claude.ai usage limits via Chrome AppleScript.
 
-Runs a fetch() inside a live Chrome claude.ai tab — no curl, no Cloudflare.
+Runs a fetch() inside a live Chrome claude.ai tab — real browser session,
+no separate auth, no Cloudflare friction.
 
 Exit codes:
-  0  within limits (or Chrome unavailable — fail open)
+  0  within limits
   1  one or more limits exceeded
+  2  probe failed (Chrome unavailable, no claude.ai tab, API error)
 
-Prints JSON to stdout in all cases.
+On exit 2, callers consult CLAUDE_QUOTA_ON_PROBE_FAILURE:
+  stop     (default) — treat as limited, pause Claude
+  continue            — treat as within limits, keep going
+
+Usage:
+  claude-probe           check limits
+  claude-probe --check   validate the full setup and exit
 """
 
-import subprocess, json, sys
+import subprocess, json, sys, os
 
-# AppleScript finds any claude.ai tab, fires an async fetch that writes to
-# localStorage, waits for it to resolve, then reads the result back.
-# Two-step because AppleScript can't await JS Promises directly.
+FAIL_MODE = os.environ.get('CLAUDE_QUOTA_ON_PROBE_FAILURE', 'stop').lower()
+
+# Two-step because AppleScript cannot await JS Promises directly.
+# Step 1: kick off the fetch, store result in localStorage.
+# Step 2: after a short delay, read it back as a plain string.
 APPLESCRIPT = """
 tell application "Google Chrome"
     set claudeTab to missing value
@@ -40,7 +50,7 @@ tell application "Google Chrome"
                 fetch('/api/organizations/' + org + '/usage')
                     .then(r => r.ok ? r.json() : Promise.reject('HTTP_' + r.status))
                     .then(d => localStorage.setItem('_claude_probe', JSON.stringify(d)))
-                    .catch(e => localStorage.setItem('_claude_probe', 'ERR:' + e));
+                    .catch(e => localStorage.setItem('_claude_probe', 'ERR:' + String(e)));
             }
         "
     end tell
@@ -51,25 +61,135 @@ tell application "Google Chrome"
 end tell
 """
 
-def main():
+CHECK_APPLESCRIPT = """
+tell application "Google Chrome"
+    if not running then
+        return "NOT_RUNNING"
+    end if
+    set claudeTab to missing value
+    repeat with w in windows
+        repeat with t in tabs of w
+            if URL of t contains "claude.ai" then
+                set claudeTab to t
+                exit repeat
+            end if
+        end repeat
+        if claudeTab is not missing value then exit repeat
+    end repeat
+    if claudeTab is missing value then
+        return "NO_TAB"
+    end if
+    return "OK:" & (URL of claudeTab)
+end tell
+"""
+
+
+def probe_failure(reason):
+    out = {"limited": None, "probe_failed": True, "reason": reason, "fail_mode": FAIL_MODE}
+    print(json.dumps(out))
+    sys.exit(2)
+
+
+def run_check():
+    """Validate the full setup and report each step."""
+    ok = True
+
+    # Step 1: Chrome running?
     result = subprocess.run(
-        ['osascript', '-e', APPLESCRIPT],
-        capture_output=True, text=True, timeout=10
+        ['osascript', '-e', 'tell application "Google Chrome" to return running'],
+        capture_output=True, text=True, timeout=5
+    )
+    chrome_running = result.stdout.strip() == 'true'
+    print(f"  {'✓' if chrome_running else '✗'} Chrome is running")
+    if not chrome_running:
+        print("    → Open Chrome and navigate to claude.ai")
+        sys.exit(1)
+
+    # Step 2: claude.ai tab open?
+    result = subprocess.run(
+        ['osascript', '-e', CHECK_APPLESCRIPT],
+        capture_output=True, text=True, timeout=5
     )
     raw = result.stdout.strip()
+    has_tab = raw.startswith('OK:')
+    tab_url = raw[3:] if has_tab else ''
+    print(f"  {'✓' if has_tab else '✗'} claude.ai tab found{' (' + tab_url + ')' if tab_url else ''}")
+    if not has_tab:
+        print("    → Open a tab at claude.ai")
+        ok = False
 
-    if raw in ('NO_TAB', 'NO_ORG', 'missing value', '') or raw.startswith('HTTP_'):
-        # Chrome not available or no claude.ai tab — fail open, don't block work
-        print(json.dumps({"limited": False, "reason": raw or "no output"}))
-        sys.exit(0)
+    # Step 3: AppleScript JS access enabled?
+    test = subprocess.run(
+        ['osascript', '-e',
+         "tell application \"Google Chrome\" to tell front window's active tab "
+         "to execute javascript \"1+1\""],
+        capture_output=True, text=True, timeout=5
+    )
+    js_ok = test.returncode == 0 and test.stdout.strip() == '2'
+    print(f"  {'✓' if js_ok else '✗'} Chrome AppleScript JS access enabled")
+    if not js_ok:
+        print("    → Chrome → View → Developer → Allow JavaScript from Apple Events")
+        ok = False
+
+    if not ok:
+        sys.exit(1)
+
+    # Step 4: full probe
+    print("  ↻ Running probe (takes ~3s)...")
+    result = subprocess.run(
+        ['osascript', '-e', APPLESCRIPT],
+        capture_output=True, text=True, timeout=15
+    )
+    raw = result.stdout.strip()
+    try:
+        data = json.loads(raw)
+        five  = data.get('five_hour')  or {}
+        seven = data.get('seven_day') or {}
+        print("  ✓ API reachable")
+        print(f"    5-hour utilization:  {five.get('utilization', '?')}%  "
+              f"(resets {five.get('resets_at', '?')})")
+        print(f"    7-day utilization:   {seven.get('utilization', '?')}%  "
+              f"(resets {seven.get('resets_at', '?')})")
+        print(f"\n  CLAUDE_QUOTA_ON_PROBE_FAILURE={FAIL_MODE}")
+        print("\n  Setup looks good.")
+    except (json.JSONDecodeError, TypeError):
+        print(f"  ✗ API call failed: {raw}")
+        sys.exit(1)
+
+
+def main():
+    if len(sys.argv) > 1 and sys.argv[1] == '--check':
+        print("claude-quota setup check:")
+        run_check()
+        return
+
+    try:
+        result = subprocess.run(
+            ['osascript', '-e', APPLESCRIPT],
+            capture_output=True, text=True, timeout=15
+        )
+    except subprocess.TimeoutExpired:
+        probe_failure('timeout')
+        return  # unreachable but satisfies static analysis
+
+    raw = result.stdout.strip()
+
+    if not raw or raw in ('missing value', 'TIMEOUT'):
+        probe_failure('no response from Chrome')
+    elif raw == 'NO_TAB':
+        probe_failure('no claude.ai tab open in Chrome')
+    elif raw == 'NO_ORG':
+        probe_failure('could not read org from claude.ai cookie')
+    elif raw.startswith('ERR:') or raw.startswith('HTTP_'):
+        probe_failure(raw)
 
     try:
         data = json.loads(raw)
-    except json.JSONDecodeError:
-        print(json.dumps({"limited": False, "reason": f"parse error: {raw[:80]}"}))
-        sys.exit(0)
+    except (json.JSONDecodeError, TypeError):
+        probe_failure(f'JSON parse error: {raw[:80]}')
+        return
 
-    five  = data.get('five_hour') or {}
+    five  = data.get('five_hour')  or {}
     seven = data.get('seven_day') or {}
 
     over_five  = (five.get('utilization')  or 0) >= 100
@@ -77,9 +197,9 @@ def main():
     limited    = over_five or over_seven
 
     out = {
-        "limited":   limited,
-        "five_hour":  {"utilization": five.get('utilization'),  "resets_at": five.get('resets_at'),  "exceeded": over_five},
-        "seven_day":  {"utilization": seven.get('utilization'), "resets_at": seven.get('resets_at'), "exceeded": over_seven},
+        "limited":  limited,
+        "five_hour": {"utilization": five.get('utilization'),  "resets_at": five.get('resets_at'),  "exceeded": over_five},
+        "seven_day": {"utilization": seven.get('utilization'), "resets_at": seven.get('resets_at'), "exceeded": over_seven},
     }
 
     if limited:
@@ -90,6 +210,7 @@ def main():
 
     print(json.dumps(out))
     sys.exit(1 if limited else 0)
+
 
 if __name__ == '__main__':
     main()
