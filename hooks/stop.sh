@@ -29,6 +29,18 @@ if printf '%s' "$input" | python3 -c \
     exit 0
 fi
 
+# When running claude -p (print/non-interactive mode), Claude outputs only the
+# FINAL assistant turn to stdout. Without blocking, the stop hook causes a second
+# turn where Claude narrates "the stop hook ran cleanly" — swallowing the actual
+# response (e.g. a code review ending with VERDICT: PASS).
+#
+# Set CLAUDE_QUOTA_BLOCK_FOLLOW_UP=1 in any context where you run claude -p and
+# want the real response to be the sole stdout output (e.g. CI pipelines).
+if [ "${CLAUDE_QUOTA_BLOCK_FOLLOW_UP:-}" = "1" ]; then
+    printf '{"decision":"block"}'
+    exit 0
+fi
+
 # Probe limits. --cached uses an adaptive interval so the 3-second AppleScript
 # call doesn't fire after every response — only when the cache is stale.
 probe_out=$("$PROBE" --cached 2>/dev/null)

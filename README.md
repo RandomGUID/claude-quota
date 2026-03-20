@@ -90,3 +90,29 @@ always accurate.
 - The VS Code Claude extension is unaffected — Stop hooks only fire for Claude Code CLI.
 - Monthly extra-usage cap is not checked — manage it in your claude.ai account settings.
 - Other browsers (Safari, Firefox) are not supported.
+
+## Using claude -p (print mode) alongside this hook
+
+When `claude` runs non-interactively with `-p` / `--print`, it only outputs the
+**final** assistant turn to stdout. Without intervention, the Stop hook causes a
+second turn where Claude narrates the hook result ("the stop hook ran cleanly")
+and *that* becomes the sole output — the actual response is swallowed.
+
+Set `CLAUDE_QUOTA_BLOCK_FOLLOW_UP=1` in any context where you run `claude -p` and
+need the real response to be the sole stdout output:
+
+```sh
+CLAUDE_QUOTA_BLOCK_FOLLOW_UP=1 claude -p "$(cat prompt.txt)" < input.txt
+```
+
+Or in a CI environment variable block:
+
+```yaml
+env:
+  CLAUDE_QUOTA_BLOCK_FOLLOW_UP: "1"
+  CLAUDE_QUOTA_ON_PROBE_FAILURE: continue  # Chrome not running in CI
+```
+
+This matters any time you pipe `claude -p` output into a file or another process — for
+example, a CI code-review workflow that captures the output and parses it for a
+`VERDICT:` line.
