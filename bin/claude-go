@@ -1,0 +1,137 @@
+#!/bin/sh
+# Autonomous work loop for Claude Code with quota awareness.
+#
+# Runs `claude -p <prompt>` in a loop, checking usage limits between each
+# iteration. Each run gets a fresh context — no --resume, no accumulated
+# conversation history. Designed for multi-worktree setups where each
+# instance picks up the next available task from a shared work queue.
+#
+# Usage:
+#   claude-go [claude args...]
+#     Run from the worktree directory you want Claude to work in.
+#     The first positional argument is the prompt (default: "/go").
+#
+#   Examples:
+#     claude-go                              # runs: claude -p "/go"
+#     claude-go "/go" --dangerously-skip-permissions
+#     CLAUDE_GO_TIMEOUT=90 claude-go "/go"
+#
+# Environment:
+#   CLAUDE_GO_TIMEOUT=60
+#     Minutes before a session is killed. Default: 60. Set to 0 to disable.
+#
+#   CLAUDE_GO_COOLDOWN=10
+#     Seconds to wait between iterations. Default: 10. Prevents tight loops
+#     on fast failures.
+#
+#   CLAUDE_QUOTA_ON_PROBE_FAILURE=stop|continue
+#     Inherited from claude-quota. Default: stop.
+
+PROBE="${HOME}/bin/claude-probe"
+LIMIT_FILE="${HOME}/.claude/limit_reset_at"
+FAIL_MODE="${CLAUDE_QUOTA_ON_PROBE_FAILURE:-stop}"
+TIMEOUT_MINS="${CLAUDE_GO_TIMEOUT:-60}"
+COOLDOWN="${CLAUDE_GO_COOLDOWN:-10}"
+
+# Parse arguments: first arg is the prompt, rest are passed to claude.
+PROMPT="${1:-/go}"
+shift 2>/dev/null || true
+
+local_time() {
+    python3 -c "
+from datetime import datetime
+dt = datetime.fromisoformat('$1'.replace('Z', '+00:00')).astimezone()
+print(dt.strftime('%a %b %-d at %-I:%M %p %Z'))
+" 2>/dev/null || printf '%s' "$1"
+}
+
+# Sleep until a quota reset time, then return.
+wait_until_reset() {
+    resume_at="$1"
+    if [ -z "$resume_at" ]; then
+        printf '[claude-go] Usage limit hit, reset time unknown. Waiting 1 hour.\n'
+        sleep 3600
+        return
+    fi
+
+    reset_epoch=$(python3 -c "
+from datetime import datetime
+dt = datetime.fromisoformat('$resume_at'.replace('Z', '+00:00'))
+print(int(dt.timestamp()))
+" 2>/dev/null)
+
+    now=$(date +%s)
+    wait_secs=$((reset_epoch - now + 60))   # 60s buffer after reset
+
+    if [ "$wait_secs" -gt 0 ]; then
+        pretty=$(local_time "$resume_at")
+        printf '[claude-go] Usage limit hit. Waiting until %s (%d min).\n' \
+            "$pretty" "$((wait_secs / 60))"
+        sleep "$wait_secs"
+    fi
+}
+
+# Check quota. Returns 0 if clear, 1 if we had to wait (caller should recheck).
+check_quota() {
+    probe_out=$("$PROBE" 2>/dev/null)
+    probe_code=$?
+
+    if [ "$probe_code" -eq 2 ]; then
+        if [ "$FAIL_MODE" = "continue" ]; then
+            return 0
+        fi
+        printf '[claude-go] Probe failed (Chrome unreachable?). Waiting 1 hour.\n'
+        sleep 3600
+        return 1
+    fi
+
+    if [ "$probe_code" -eq 1 ]; then
+        resume_at=$(printf '%s' "$probe_out" | python3 -c \
+            "import json,sys; d=json.load(sys.stdin); print(d.get('resume_at',''))" 2>/dev/null)
+        wait_until_reset "$resume_at"
+        return 1
+    fi
+
+    return 0
+}
+
+# Check for a limit flag written by the Stop hook mid-session.
+check_limit_file() {
+    if [ -f "$LIMIT_FILE" ]; then
+        resume_at=$(cat "$LIMIT_FILE")
+        rm -f "$LIMIT_FILE"
+        if [ -n "$resume_at" ]; then
+            wait_until_reset "$resume_at"
+        fi
+    fi
+}
+
+# --- main loop ---
+
+while true; do
+    # Wait for quota headroom before starting a session.
+    while ! check_quota; do :; done
+
+    printf '\n[claude-go] Starting fresh session (prompt: %s, timeout: %sm)...\n' \
+        "$PROMPT" "$TIMEOUT_MINS"
+
+    if [ "$TIMEOUT_MINS" -gt 0 ] 2>/dev/null; then
+        timeout "${TIMEOUT_MINS}m" claude -p "$PROMPT" "$@"
+    else
+        claude -p "$PROMPT" "$@"
+    fi
+    code=$?
+
+    if [ "$code" -eq 124 ]; then
+        printf '[claude-go] Session timed out after %s min.\n' "$TIMEOUT_MINS"
+    elif [ "$code" -eq 0 ]; then
+        printf '[claude-go] Session completed cleanly.\n'
+    else
+        printf '[claude-go] Session exited with code %d.\n' "$code"
+    fi
+
+    # The Stop hook may have flagged a limit mid-session.
+    check_limit_file
+
+    sleep "$COOLDOWN"
+done

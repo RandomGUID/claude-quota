@@ -91,28 +91,51 @@ always accurate.
 - Monthly extra-usage cap is not checked — manage it in your claude.ai account settings.
 - Other browsers (Safari, Firefox) are not supported.
 
-## Using claude -p (print mode) alongside this hook
+## Autonomous work loops (`claude-go`)
 
-When `claude` runs non-interactively with `-p` / `--print`, it only outputs the
-**final** assistant turn to stdout. Without intervention, the Stop hook causes a
-second turn where Claude narrates the hook result ("the stop hook ran cleanly")
-and *that* becomes the sole output — the actual response is swallowed.
-
-Set `CLAUDE_QUOTA_BLOCK_FOLLOW_UP=1` in any context where you run `claude -p` and
-need the real response to be the sole stdout output:
+`claude-watch` is for interactive sessions — it resumes the same conversation when
+a limit resets. For **autonomous, unattended work** where Claude picks up tasks
+from a shared queue, use `claude-go` instead:
 
 ```sh
-CLAUDE_QUOTA_BLOCK_FOLLOW_UP=1 claude -p "$(cat prompt.txt)" < input.txt
+cd ~/trees/worktree1
+claude-go "/go" --dangerously-skip-permissions
 ```
 
-Or in a CI environment variable block:
+`claude-go` runs `claude -p <prompt>` in a loop. Each iteration gets a fresh
+context — no `--resume`, no accumulated history. Between iterations it checks
+quota and waits if a limit is hit.
+
+This is designed for multi-worktree setups where each instance reads a build plan,
+claims the next available task, does the work, opens a PR, and exits. The loop
+restarts with fresh context for the next task.
+
+### Environment variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `CLAUDE_GO_TIMEOUT` | `60` | Minutes before a session is killed. Set to `0` to disable. |
+| `CLAUDE_GO_COOLDOWN` | `10` | Seconds between iterations. Prevents tight loops on fast failures. |
+| `CLAUDE_QUOTA_ON_PROBE_FAILURE` | `stop` | Inherited from claude-quota. |
+
+### Example: 4 parallel worktrees
+
+```sh
+for i in 1 2 3 4; do
+    (cd ~/trees/claude$i && claude-go "/go" --dangerously-skip-permissions &)
+done
+```
+
+Each instance self-arranges by checking remote branches to see which tasks are
+already claimed. See the `claude-go --help` header for full usage.
+
+## Using `claude -p` for one-shot tasks
+
+The Stop hook's `stop_hook_active` guard prevents the second-turn output-swallowing
+issue that affected earlier versions. One-shot `claude -p` calls work without any
+special environment variables. For CI environments where Chrome isn't available:
 
 ```yaml
 env:
-  CLAUDE_QUOTA_BLOCK_FOLLOW_UP: "1"
-  CLAUDE_QUOTA_ON_PROBE_FAILURE: continue  # Chrome not running in CI
+  CLAUDE_QUOTA_ON_PROBE_FAILURE: continue
 ```
-
-This matters any time you pipe `claude -p` output into a file or another process — for
-example, a CI code-review workflow that captures the output and parses it for a
-`VERDICT:` line.

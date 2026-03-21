@@ -15,7 +15,8 @@ mkdir -p "$BIN_DIR" "$HOOKS_DIR"
 # Install executables
 cp "$REPO_DIR/bin/claude-probe" "$BIN_DIR/claude-probe"
 cp "$REPO_DIR/bin/claude-watch" "$BIN_DIR/claude-watch"
-chmod +x "$BIN_DIR/claude-probe" "$BIN_DIR/claude-watch"
+cp "$REPO_DIR/bin/claude-go" "$BIN_DIR/claude-go"
+chmod +x "$BIN_DIR/claude-probe" "$BIN_DIR/claude-watch" "$BIN_DIR/claude-go"
 
 # Install Stop hook
 cp "$REPO_DIR/hooks/stop.sh" "$HOOKS_DIR/stop.sh"

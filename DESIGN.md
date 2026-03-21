@@ -112,6 +112,31 @@ want tighter guarantees, adjust the thresholds in `cache_interval()`.
 `claude-watch` always uses a fresh probe (no `--cached`) since it only runs once
 on Claude exit, where an accurate reading matters.
 
+## `claude-go` — autonomous work loops
+
+`claude-watch` wraps an interactive session: when a limit hits, it sleeps and
+then runs `claude --resume` to continue the same conversation. This breaks with
+`claude -p` (print mode) because there is no session to resume.
+
+`claude-go` solves this for autonomous, unattended work. Instead of resuming, it
+runs `claude -p <prompt>` in a fresh loop. Each iteration:
+
+1. Runs a fresh `claude-probe` to check quota before starting.
+2. Runs `claude -p <prompt>` with an optional timeout.
+3. On exit, checks `~/.claude/limit_reset_at` (written by the Stop hook if a
+   limit was hit mid-session).
+4. Sleeps for `CLAUDE_GO_COOLDOWN` seconds (default 10), then loops.
+
+Fresh context each iteration is a feature, not a limitation. In a multi-worktree
+setup each instance reads a build plan, claims a task, implements it, opens a PR,
+and exits. The next iteration reads the build plan again with fresh context and
+picks up the next unclaimed task. Long-running conversations accumulate context
+that slows the model and causes drift — restarting avoids both.
+
+The timeout (`CLAUDE_GO_TIMEOUT`, default 60 minutes) is a safety net for
+sessions that get stuck in failing CI loops or circular reasoning. When the
+timeout fires, the wrapper logs it and restarts fresh.
+
 ## What this does not cover
 
 - **Monthly extra-usage cap** (`extra_usage` in the API response) — this is a
